@@ -16,11 +16,15 @@
 
 #include "buffer/arc_replacer.h"
 
+#include <chrono>
+#include <optional>
+
+#include "common/exception.h"
 #include "gtest/gtest.h"
 
 namespace bustub {
 
-TEST(ArcReplacerTest, DISABLED_SampleTest) {
+TEST(ArcReplacerTest, SampleTest) {
   // for the sake of simplicity
   // we use (a, fb) to notate page a on frame b,
   // (a, _) to mark ghost page with page id a
@@ -102,7 +106,7 @@ TEST(ArcReplacerTest, DISABLED_SampleTest) {
   ASSERT_EQ(2, arc_replacer.Evict());
 }
 
-TEST(ArcReplacerTest, DISABLED_SampleTest2) {
+TEST(ArcReplacerTest, SampleTest2) {
   // Test a smaller capacity
   ArcReplacer arc_replacer(3);
   // Fill up the replacer
@@ -215,5 +219,93 @@ TEST(ArcReplacerTest, DISABLED_SampleTest2) {
 }
 
 // Feel free to write more tests!
+
+TEST(ArcReplacerTest, SizeAndSetEvictableIdempotent) {
+  ArcReplacer arc(4);
+  ASSERT_EQ(0, arc.Size());
+  arc.RecordAccess(0, 10);
+  ASSERT_EQ(0, arc.Size());
+  arc.SetEvictable(0, true);
+  ASSERT_EQ(1, arc.Size());
+  arc.SetEvictable(0, true);
+  ASSERT_EQ(1, arc.Size());
+  arc.SetEvictable(0, false);
+  ASSERT_EQ(0, arc.Size());
+  arc.SetEvictable(0, false);
+  ASSERT_EQ(0, arc.Size());
+  ASSERT_THROW(arc.SetEvictable(INVALID_FRAME_ID, true), Exception);
+}
+
+TEST(ArcReplacerTest, GhostHitAdaptationAndClamp) {
+  ArcReplacer arc(2);
+  arc.RecordAccess(0, 1);
+  arc.SetEvictable(0, true);
+  arc.RecordAccess(1, 2);
+  arc.SetEvictable(1, true);
+  ASSERT_EQ(0, arc.Evict());
+  ASSERT_EQ(1, arc.Evict());
+  // Both ghosts in MRU ghost; B1=2, B2=0. Hit page 1: delta=1, p=1.
+  arc.RecordAccess(0, 1);
+  arc.SetEvictable(0, true);
+  // Prefers MFU when mru size (0) < p (1); only MFU has page 1.
+  ASSERT_EQ(0, arc.Evict());
+  // Hit MFU ghost page 1: B2>=B1 so decrease by 1 -> p=0.
+  arc.RecordAccess(1, 1);
+  arc.SetEvictable(1, true);
+  ASSERT_EQ(1, arc.Size());
+}
+
+TEST(ArcReplacerTest, SkipPinnedAndFallback) {
+  ArcReplacer arc(3);
+  arc.RecordAccess(0, 1);
+  arc.SetEvictable(0, true);
+  arc.RecordAccess(1, 2);
+  arc.SetEvictable(1, false);
+  arc.RecordAccess(2, 3);
+  arc.SetEvictable(2, true);
+  // Promote 0 and 2 to MFU so MRU only has pinned frame 1.
+  arc.RecordAccess(0, 1);
+  arc.RecordAccess(2, 3);
+  // p=0, mru.size()=1 >= 0 -> prefer MRU, but only pinned; fallback MFU LRU.
+  auto victim = arc.Evict();
+  ASSERT_TRUE(victim.has_value());
+  ASSERT_TRUE(victim == 0 || victim == 2);
+}
+
+TEST(ArcReplacerTest, NoEvictableReturnsNullopt) {
+  ArcReplacer arc(2);
+  arc.RecordAccess(0, 1);
+  arc.SetEvictable(0, false);
+  arc.RecordAccess(1, 2);
+  arc.SetEvictable(1, false);
+  ASSERT_EQ(std::nullopt, arc.Evict());
+  ASSERT_EQ(0, arc.Size());
+}
+
+TEST(ArcReplacerTest, RemoveSemantics) {
+  ArcReplacer arc(3);
+  arc.RecordAccess(0, 1);
+  arc.SetEvictable(0, true);
+  arc.Remove(0);
+  ASSERT_EQ(0, arc.Size());
+  arc.Remove(0);  // not found
+  arc.RecordAccess(1, 2);
+  arc.SetEvictable(1, false);
+  ASSERT_THROW(arc.Remove(1), Exception);
+}
+
+TEST(ArcReplacerTest, RecordAccessPerformance) {
+  ArcReplacer arc(64);
+  for (int i = 0; i < 64; i++) {
+    arc.RecordAccess(i, i);
+    arc.SetEvictable(i, true);
+  }
+  auto start = std::chrono::steady_clock::now();
+  for (int i = 0; i < 100000; i++) {
+    arc.RecordAccess(i % 64, i % 64);
+  }
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+  ASSERT_LT(ms, 2000);
+}
 
 }  // namespace bustub

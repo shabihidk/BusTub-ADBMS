@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include <cstdio>
+#include <cstring>
 
 #include "buffer/buffer_pool_manager.h"
 #include "storage/disk/disk_manager_memory.h"
@@ -22,7 +23,7 @@ namespace bustub {
 
 const size_t FRAMES = 10;
 
-TEST(PageGuardTest, DISABLED_DropTest) {
+TEST(PageGuardTest, DropTest) {
   auto disk_manager = std::make_shared<DiskManagerUnlimitedMemory>();
   auto bpm = std::make_shared<BufferPoolManager>(FRAMES, disk_manager.get());
 
@@ -111,7 +112,7 @@ TEST(PageGuardTest, DISABLED_DropTest) {
   disk_manager->ShutDown();
 }
 
-TEST(PageGuardTest, DISABLED_MoveTest) {
+TEST(PageGuardTest, MoveTest) {
   auto disk_manager = std::make_shared<DiskManagerUnlimitedMemory>();
   auto bpm = std::make_shared<BufferPoolManager>(FRAMES, disk_manager.get());
 
@@ -208,6 +209,73 @@ TEST(PageGuardTest, DISABLED_MoveTest) {
   }
 
   // Shutdown the disk manager and remove the temporary file we created.
+  disk_manager->ShutDown();
+}
+
+TEST(PageGuardTest, InvalidAndRepeatedDrop) {
+  auto disk_manager = std::make_shared<DiskManagerUnlimitedMemory>();
+  auto bpm = std::make_shared<BufferPoolManager>(FRAMES, disk_manager.get());
+
+  ReadPageGuard invalid_read;
+  WritePageGuard invalid_write;
+  invalid_read.Drop();
+  invalid_write.Drop();
+
+  const auto pid = bpm->NewPage();
+  {
+    auto guard = bpm->WritePage(pid);
+    ASSERT_EQ(1, bpm->GetPinCount(pid));
+    guard.Drop();
+    guard.Drop();
+    ASSERT_EQ(0, bpm->GetPinCount(pid));
+  }
+  disk_manager->ShutDown();
+}
+
+TEST(PageGuardTest, FlushThenMutatePersists) {
+  auto disk_manager = std::make_shared<DiskManagerUnlimitedMemory>();
+  auto bpm = std::make_shared<BufferPoolManager>(2, disk_manager.get());
+
+  const auto pid = bpm->NewPage();
+  {
+    auto guard = bpm->WritePage(pid);
+    std::strcpy(guard.GetDataMut(), "first");  // NOLINT
+    guard.Flush();
+    ASSERT_FALSE(guard.IsDirty());
+    std::strcpy(guard.GetDataMut(), "second");  // NOLINT
+    ASSERT_TRUE(guard.IsDirty());
+  }
+
+  // Force eviction of pid.
+  const auto other1 = bpm->NewPage();
+  const auto other2 = bpm->NewPage();
+  { auto g1 = bpm->WritePage(other1); }
+  { auto g2 = bpm->WritePage(other2); }
+
+  auto reload = bpm->ReadPage(pid);
+  ASSERT_EQ(0, std::strcmp("second", reload.GetData()));
+  disk_manager->ShutDown();
+}
+
+TEST(PageGuardTest, SharedReadersExclusiveWriter) {
+  auto disk_manager = std::make_shared<DiskManagerUnlimitedMemory>();
+  auto bpm = std::make_shared<BufferPoolManager>(FRAMES, disk_manager.get());
+  const auto pid = bpm->NewPage();
+  {
+    auto w = bpm->WritePage(pid);
+    std::strcpy(w.GetDataMut(), "shared");  // NOLINT
+  }
+
+  auto r1 = bpm->ReadPage(pid);
+  auto r2 = bpm->ReadPage(pid);
+  ASSERT_EQ(2, bpm->GetPinCount(pid));
+  ASSERT_EQ(0, std::strcmp("shared", r1.GetData()));
+  ASSERT_EQ(0, std::strcmp("shared", r2.GetData()));
+  r1.Drop();
+  r2.Drop();
+
+  auto w = bpm->WritePage(pid);
+  ASSERT_EQ(1, bpm->GetPinCount(pid));
   disk_manager->ShutDown();
 }
 

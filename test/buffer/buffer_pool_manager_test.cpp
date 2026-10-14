@@ -10,11 +10,16 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <thread>
+#include <vector>
 
 #include "buffer/buffer_pool_manager.h"
 #include "gtest/gtest.h"
+#include "storage/disk/disk_manager_memory.h"
 #include "storage/page/page_guard.h"
 
 namespace bustub {
@@ -29,7 +34,7 @@ void CopyString(char *dest, const std::string &src) {
   snprintf(dest, BUSTUB_PAGE_SIZE, "%s", src.c_str());
 }
 
-TEST(BufferPoolManagerTest, DISABLED_VeryBasicTest) {
+TEST(BufferPoolManagerTest, VeryBasicTest) {
   // A very basic test.
 
   auto disk_manager = std::make_shared<DiskManager>(db_fname);
@@ -60,7 +65,7 @@ TEST(BufferPoolManagerTest, DISABLED_VeryBasicTest) {
   ASSERT_TRUE(bpm->DeletePage(pid));
 }
 
-TEST(BufferPoolManagerTest, DISABLED_PagePinEasyTest) {
+TEST(BufferPoolManagerTest, PagePinEasyTest) {
   auto disk_manager = std::make_shared<DiskManager>(db_fname);
   auto bpm = std::make_shared<BufferPoolManager>(2, disk_manager.get());
 
@@ -158,7 +163,7 @@ TEST(BufferPoolManagerTest, DISABLED_PagePinEasyTest) {
   remove(disk_manager->GetLogFileName());
 }
 
-TEST(BufferPoolManagerTest, DISABLED_PagePinMediumTest) {
+TEST(BufferPoolManagerTest, PagePinMediumTest) {
   auto disk_manager = std::make_shared<DiskManager>(db_fname);
   auto bpm = std::make_shared<BufferPoolManager>(FRAMES, disk_manager.get());
 
@@ -237,7 +242,7 @@ TEST(BufferPoolManagerTest, DISABLED_PagePinMediumTest) {
   remove(db_fname);
 }
 
-TEST(BufferPoolManagerTest, DISABLED_PageAccessTest) {
+TEST(BufferPoolManagerTest, PageAccessTest) {
   const size_t rounds = 50;
 
   auto disk_manager = std::make_shared<DiskManager>(db_fname);
@@ -275,7 +280,7 @@ TEST(BufferPoolManagerTest, DISABLED_PageAccessTest) {
   thread.join();
 }
 
-TEST(BufferPoolManagerTest, DISABLED_ContentionTest) {
+TEST(BufferPoolManagerTest, ContentionTest) {
   auto disk_manager = std::make_shared<DiskManager>(db_fname);
   auto bpm = std::make_shared<BufferPoolManager>(FRAMES, disk_manager.get());
 
@@ -317,7 +322,7 @@ TEST(BufferPoolManagerTest, DISABLED_ContentionTest) {
   thread1.join();
 }
 
-TEST(BufferPoolManagerTest, DISABLED_DeadlockTest) {
+TEST(BufferPoolManagerTest, DeadlockTest) {
   auto disk_manager = std::make_shared<DiskManager>(db_fname);
   auto bpm = std::make_shared<BufferPoolManager>(FRAMES, disk_manager.get());
 
@@ -357,7 +362,7 @@ TEST(BufferPoolManagerTest, DISABLED_DeadlockTest) {
   child.join();
 }
 
-TEST(BufferPoolManagerTest, DISABLED_EvictableTest) {
+TEST(BufferPoolManagerTest, EvictableTest) {
   // Test if the evictable status of a frame is always correct.
   const size_t rounds = 1000;
   const size_t num_readers = 8;
@@ -425,6 +430,102 @@ TEST(BufferPoolManagerTest, DISABLED_EvictableTest) {
     for (size_t i = 0; i < num_readers; i++) {
       readers[i].join();
     }
+  }
+}
+
+TEST(BufferPoolManagerTest, DirtyEvictionAndReload) {
+  auto disk_manager = std::make_shared<DiskManagerUnlimitedMemory>();
+  auto bpm = std::make_shared<BufferPoolManager>(2, disk_manager.get());
+
+  const auto p0 = bpm->NewPage();
+  const auto p1 = bpm->NewPage();
+  const auto p2 = bpm->NewPage();
+  {
+    auto g0 = bpm->WritePage(p0);
+    CopyString(g0.GetDataMut(), "keep-me");
+  }
+  {
+    auto g1 = bpm->WritePage(p1);
+    CopyString(g1.GetDataMut(), "other");
+  }
+  {
+    auto g2 = bpm->WritePage(p2);
+    CopyString(g2.GetDataMut(), "evictor");
+  }
+  auto reload = bpm->ReadPage(p0);
+  EXPECT_STREQ(reload.GetData(), "keep-me");
+}
+
+TEST(BufferPoolManagerTest, DeletePinnedUnpinnedNonresident) {
+  auto disk_manager = std::make_shared<DiskManagerUnlimitedMemory>();
+  auto bpm = std::make_shared<BufferPoolManager>(FRAMES, disk_manager.get());
+  const auto pinned = bpm->NewPage();
+  const auto unpinned = bpm->NewPage();
+  auto guard = bpm->WritePage(pinned);
+  ASSERT_FALSE(bpm->DeletePage(pinned));
+  guard.Drop();
+  ASSERT_TRUE(bpm->DeletePage(unpinned));
+  ASSERT_TRUE(bpm->DeletePage(pinned));
+  ASSERT_TRUE(bpm->DeletePage(99999));  // never allocated / nonresident
+}
+
+TEST(BufferPoolManagerTest, FlushSafeAndUnsafe) {
+  auto disk_manager = std::make_shared<DiskManagerUnlimitedMemory>();
+  auto bpm = std::make_shared<BufferPoolManager>(FRAMES, disk_manager.get());
+  const auto pid = bpm->NewPage();
+  {
+    auto guard = bpm->WritePage(pid);
+    CopyString(guard.GetDataMut(), "flush-me");
+  }
+  ASSERT_TRUE(bpm->FlushPageUnsafe(pid));
+  ASSERT_TRUE(bpm->FlushPage(pid));
+  ASSERT_FALSE(bpm->FlushPage(123456));
+  bpm->FlushAllPagesUnsafe();
+  bpm->FlushAllPages();
+}
+
+TEST(BufferPoolManagerTest, ConcurrentSamePageFetch) {
+  auto disk_manager = std::make_shared<DiskManagerUnlimitedMemory>();
+  auto bpm = std::make_shared<BufferPoolManager>(FRAMES, disk_manager.get());
+  const auto pid = bpm->NewPage();
+  {
+    auto g = bpm->WritePage(pid);
+    CopyString(g.GetDataMut(), "race");
+  }
+
+  std::atomic<int> ready{0};
+  std::atomic<bool> start{false};
+  std::vector<std::thread> threads;
+  for (int i = 0; i < 8; i++) {
+    threads.emplace_back([&]() {
+      ready.fetch_add(1);
+      while (!start.load()) {
+      }
+      auto guard = bpm->ReadPage(pid);
+      EXPECT_STREQ(guard.GetData(), "race");
+    });
+  }
+  while (ready.load() < 8) {
+  }
+  start.store(true);
+  for (auto &t : threads) {
+    t.join();
+  }
+  ASSERT_EQ(0, bpm->GetPinCount(pid));
+}
+
+TEST(BufferPoolManagerTest, SmallPoolChurn) {
+  auto disk_manager = std::make_shared<DiskManagerUnlimitedMemory>();
+  auto bpm = std::make_shared<BufferPoolManager>(3, disk_manager.get());
+  std::vector<page_id_t> pages;
+  for (int i = 0; i < 20; i++) {
+    pages.push_back(bpm->NewPage());
+    auto g = bpm->WritePage(pages.back());
+    CopyString(g.GetDataMut(), std::to_string(i));
+  }
+  for (int i = 0; i < 20; i++) {
+    auto g = bpm->ReadPage(pages[i]);
+    EXPECT_STREQ(g.GetData(), std::to_string(i).c_str());
   }
 }
 

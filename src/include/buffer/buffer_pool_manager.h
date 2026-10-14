@@ -14,6 +14,7 @@
 
 #include <list>
 #include <memory>
+#include <optional>
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
@@ -88,13 +89,8 @@ class FrameHeader {
    */
   std::vector<char> data_;
 
-  /**
-   * TODO(P1): You may add any fields or helper functions under here that you think are necessary.
-   *
-   * One potential optimization you could make is storing an optional page ID of the page that the `FrameHeader` is
-   * currently storing. This might allow you to skip searching for the corresponding (page ID, frame ID) pair somewhere
-   * else in the buffer pool manager...
-   */
+  /** @brief The page ID currently stored in this frame, or INVALID_PAGE_ID if free. */
+  page_id_t page_id_{INVALID_PAGE_ID};
 };
 
 /**
@@ -134,9 +130,8 @@ class BufferPoolManager {
   std::atomic<page_id_t> next_page_id_;
 
   /**
-   * @brief The latch protecting the buffer pool's inner data structures.
-   *
-   * TODO(P1) We recommend replacing this comment with details about what this latch actually protects.
+   * @brief Protects page_table_, free_frames_, pin/evictable transitions, page_id_ metadata,
+   * and replacer updates. Never acquire a frame rwlatch_ while holding this latch.
    */
   std::shared_ptr<std::mutex> bpm_latch_;
 
@@ -162,14 +157,8 @@ class BufferPoolManager {
    */
   LogManager *log_manager_ __attribute__((__unused__));
 
-  /**
-   * TODO(P1): You may add additional private members and helper functions if you find them necessary.
-   *
-   * There will likely be a lot of code duplication between the different modes of accessing a page.
-   *
-   * We would recommend implementing a helper function that returns the ID of a frame that is free and has nothing
-   * stored inside of it. Additionally, you may also want to implement a helper function that returns either a shared
-   * pointer to a `FrameHeader` that already has a page's data stored inside of it, or an index to said `FrameHeader`.
-   */
+  auto FindOrLoadPage(page_id_t page_id, AccessType access_type) -> std::optional<std::shared_ptr<FrameHeader>>;
+  void ScheduleAndWait(bool is_write, page_id_t page_id, char *data);
 };
+
 }  // namespace bustub

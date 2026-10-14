@@ -1,4 +1,3 @@
-
 //===----------------------------------------------------------------------===//
 //
 //                         BusTub
@@ -28,12 +27,14 @@ enum class AccessType { Unknown = 0, Lookup, Scan, Index };
 
 enum class ArcStatus { MRU, MFU, MRU_GHOST, MFU_GHOST };
 
-// TODO(student): You can modify or remove this struct as you like.
 struct FrameStatus {
   page_id_t page_id_;
   frame_id_t frame_id_;
   bool evictable_;
   ArcStatus arc_status_;
+  std::list<frame_id_t>::iterator alive_it_;
+  std::list<page_id_t>::iterator ghost_it_;
+
   FrameStatus(page_id_t pid, frame_id_t fid, bool ev, ArcStatus st)
       : page_id_(pid), frame_id_(fid), evictable_(ev), arc_status_(st) {}
 };
@@ -61,7 +62,6 @@ class ArcReplacer {
   auto Size() -> size_t;
 
  private:
-  // TODO(student): implement me! You can replace or remove these member variables as you like.
   std::list<frame_id_t> mru_;
   std::list<frame_id_t> mfu_;
   std::list<page_id_t> mru_ghost_;
@@ -77,14 +77,19 @@ class ArcReplacer {
   std::unordered_map<page_id_t, std::shared_ptr<FrameStatus>> ghost_map_;
 
   /* alive, evictable entries count */
-  [[maybe_unused]] size_t curr_size_{0};
+  size_t curr_size_{0};
   /* p as in original paper */
-  [[maybe_unused]] size_t mru_target_size_{0};
+  size_t mru_target_size_{0};
   /* c as in original paper */
-  [[maybe_unused]] size_t replacer_size_;
+  size_t replacer_size_;
   std::mutex latch_;
 
-  // TODO(student): You can add member variables / functions as you like.
+  void EraseGhost(page_id_t page_id);
+  void EraseAliveNoGhost(frame_id_t frame_id);
+  auto AddAlive(frame_id_t frame_id, page_id_t page_id, ArcStatus status) -> std::shared_ptr<FrameStatus>;
+  void MoveAliveToMfuFront(const std::shared_ptr<FrameStatus> &status);
+  auto EvictFromList(std::list<frame_id_t> *list, bool to_mru_ghost) -> std::optional<frame_id_t>;
+  void MoveAliveToGhost(const std::shared_ptr<FrameStatus> &status, bool to_mru_ghost);
 };
 
 }  // namespace bustub
